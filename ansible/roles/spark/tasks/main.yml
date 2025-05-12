@@ -7,9 +7,9 @@
 #   apt:
 #     update_cache: yes
 
-# - name: Install OpenJDK 11
+# - name: Install OpenJDK 8
 #   apt:
-#     name: openjdk-11-jdk
+#     name: openjdk-8-jdk
 #     state: present
 
 # - name: Add JAVA_HOME to .bashrc
@@ -20,8 +20,7 @@
 #     insertafter: EOF
 #     state: present
 #   become: true
-#   become_user: ubuntu
-
+#   become_user: "{{ spark_user }}"
 
 # - name: Download Spark
 #   get_url:
@@ -40,9 +39,8 @@
 #   args:
 #     creates: "{{ spark_dir }}/bin"
 
-
 # - name: Add spark variables to .bashrc file on master node only
-#   when: inventory_hostname in groups['master']  
+#   when: inventory_hostname in groups['master']
 #   ansible.builtin.lineinfile:
 #     path: /home/ubuntu/.bashrc
 #     line: "{{ item }}"
@@ -50,14 +48,13 @@
 #     insertafter: EOF
 #     state: present
 #   loop:
-#     - 'SPARK_HOME=/opt/spark'
-#     - 'SPARK_LOCAL_IP=$(hostname -f)'
-#     - 'SPARK_MASTER_HOST=$(hostname -f)'
-#     - 'PATH=$PATH:$SPARK_HOME/bin:$SPARK_HOME/sbin'
-#     - 'PYSPARK_PYTHON=python3'
+#     - "SPARK_HOME=/opt/spark"
+#     - "SPARK_LOCAL_IP=$(hostname -f)"
+#     - "SPARK_MASTER_HOST=$(hostname -f)"
+#     - "PATH=$PATH:$SPARK_HOME/bin:$SPARK_HOME/sbin"
+#     - "PYSPARK_PYTHON=python3"
 #   become: true
-#   become_user: ubuntu
-
+#   become_user: "{{ spark_user }}"
 
 # - name: Create spark-env.sh with dynamic content
 #   when: inventory_hostname in groups['master']
@@ -68,8 +65,8 @@
 #     mode: "0755"
 #   with_items:
 #     - "SPARK_MASTER_HOST={{ hostvars[groups['master'][0]]['private_ip'] }}"
-    # - "export SPARK_WORKER_MEMORY=4g"
-    # - "export SPARK_WORKER_CORES=2"
+# # - "export SPARK_WORKER_MEMORY=4g"
+# # - "export SPARK_WORKER_CORES=2"
 
 # - name: Create slaves file (only on master)
 #   when: inventory_hostname in groups['master']
@@ -81,27 +78,83 @@
 #     dest: "{{ spark_dir }}/conf/slaves"
 #     mode: "0644"
 
-- name: Generate SSH key pair on master
+# - name: Generate SSH key pair on master
+#   when: inventory_hostname in groups['master']
+#   become: true
+#   shell: |
+#     ssh-keygen -t rsa -b 4096 -f /home/{{spark_user}}/.ssh/spark-cluster-key -N "" -C "spark-cluster-key"
+#   args:
+#     creates: /home/{{spark_user}}/.ssh/spark-cluster-key
+
+# - name: Set permissions on private key
+#   when: inventory_hostname in groups['master']
+#   file:
+#     path: /home/{{ spark_user }}/.ssh/spark-cluster-key
+#     owner: "{{ spark_user }}"
+#     group: "{{ spark_user }}"
+#     mode: "0600"
+#   become: true
+
+# - name: Fetch public key from master
+#   when: inventory_hostname in groups['master']
+#   slurp:
+#     src: /home/{{ spark_user }}/.ssh/spark-cluster-key.pub
+#   register: master_pub_key
+
+# - name: Add master's public key to authorized_keys on slaves
+#   when: inventory_hostname in groups['slaves']
+#   authorized_key:
+#     user: ubuntu
+#     key: "{{ hostvars[groups['master'][0]]['master_pub_key']['content'] | b64decode }}"
+#     state: present
+
+# - name: Start Spark master and worker nodes using persistent ssh-agent
+#   when: inventory_hostname in groups['master']
+#   become: true
+#   become_user: "{{ spark_user }}"
+#   shell: |
+#     ssh-agent bash -c '
+#       ssh-add /home/{{ spark_user }}/.ssh/spark-cluster-key &&
+#       {{ spark_dir }}/sbin/start-all.sh
+#     '
+#   args:
+#     executable: /bin/bash
+
+- name: Copy Spark job to master
   when: inventory_hostname in groups['master']
-  become: true
-  shell: |
-    ssh-keygen -t rsa -b 4096 -f ~/.ssh/spark-cluster-key -N "" -C "spark-cluster-key"
+  copy:
+    src: test.py
+    dest: /home/{{ spark_user }}/test.py
+
+- name: Run Spark Job
+  when: inventory_hostname in groups['master']
+  shell: >
+    {{ spark_dir }}/bin/spark-submit
+    --master spark://{{ hostvars[groups['master'][0]]['private_ip'] }}:7077
+    /home/{{ spark_user }}/test.py &> /home/{{ spark_user }}/results.txt
+  # --executor-memory 512m
+  # --driver-memory 512m
+  # --num-executors 4
+  # --executor-cores 1
   args:
-    creates: ~/.ssh/spark-cluster-key
+    executable: /bin/bash
+#
+#
+#
+# extra
+# - name: Start Spark worker nodes
+#   when: inventory_hostname in groups['master']
+#   shell: "{{ spark_dir }}/sbin/start-workers.sh"
+#   args:
+#     executable: /bin/bash
 
-- name: Fetch public key from master
-  when: inventory_hostname in groups['master']
-  slurp:
-    src: ~/.ssh/spark-cluster-key.pub
-  register: master_pub_key
-
-- name: Add master's public key to authorized_keys on slaves
-  when: inventory_hostname in groups['slaves']
-  authorized_key:
-    user: ubuntu
-    key: "{{ hostvars[groups['master'][0]]['master_pub_key']['content'] | b64decode }}"
-    state: present
-
+# - name: Start Spark Cluster
+#   # when: inventory_hostname in groups['master']
+#   shell: "{{ spark_dir }}/sbin/stop-all.sh"
+#   args:
+#     executable: /bin/bash
+#   environment:
+#     SPARK_HOME: "{{ spark_dir }}"
 # - name: Set SPARK_HOME and PATH
 #   lineinfile:
 #     path: /etc/profile.d/spark.sh
